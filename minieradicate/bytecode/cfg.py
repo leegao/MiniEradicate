@@ -1,5 +1,5 @@
 from collections import defaultdict
-from dis import Bytecode
+from dis import Bytecode, stack_effect
 from opcode import hasjrel, hasjabs, opmap, opname
 
 ABS = set(hasjabs)
@@ -45,9 +45,13 @@ class CFG(object):
         # for i, block in enumerate(blocks):
         #     print(i, block)
         #     print(edges[i])
-
+        reverse_edges = defaultdict(set)
+        for i, js in edges.items():
+            for j in js:
+                reverse_edges[j].add(i)
         self.blocks = blocks
         self.edges = dict(edges)
+        self.reverse_edges = dict(reverse_edges)
         return self
 
     def dot(self):
@@ -55,7 +59,10 @@ class CFG(object):
         for i, block in enumerate(self.blocks):
             output += '  %s [label="%s"];\n' % (
                 i,
-                '\n'.join(str(instr.offset) + '  ' + instr.opname + ('(%s)' % instr.argval if instr.arg is not None else '') for instr in block))
+                '\n'.join(
+                    str(instr.offset) + '  ' +
+                    instr.opname + ('(%s)' % instr.argval if instr.arg is not None else '') + ' : ' +
+                    str(stack_effect(instr.opcode, instr.arg)) for instr in block))
         for i in self.edges:
             for j in self.edges[i]:
                 output += '  %s -> %s;\n' % (i, j)
