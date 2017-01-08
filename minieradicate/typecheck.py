@@ -1,9 +1,9 @@
+from dis import Instruction, stack_effect
 from functools import reduce
 from pprint import pprint
-from typing import List, TypeVar, Dict, overload, Tuple
+from typing import List, TypeVar, Dict, Tuple, Optional, Any, Set
 
 from minieradicate.bytecode.cfg import CFG
-from dis import Instruction, stack_effect
 
 class Domain(object):
     def __le__(self, other : 'D'): ...
@@ -176,6 +176,27 @@ class PythonEnvironment(Domain):
     def __repr__(self):
         return '<%s; %s; %s>' % (self.stack, self.locals, self.globals)
 
+class Tagged(Domain):
+    def __init__(self, tags : Set[Instruction], d : Domain):
+        self.tags = tags
+        self.d = d
+
+    def __and__(self, other : 'Tagged'):
+        tags = self.tags | other.tags
+        return Tagged(tags, self.d & other.d)
+
+    def __eq__(self, other : 'Tagged'):
+        return self.tags == other.tags and self.d == other.d
+
+    def __repr__(self):
+        return '%s (from %s)' % (self.d, {tag.offset for tag in self.tags})
+
+    def __le__(self, other: 'Tagged'):
+        return self.d <= other.d
+
+    def __or__(self, other: 'Tagged'):
+        tags = self.tags | other.tags
+        return Tagged(tags, self.d | other.d)
 
 class State(object):
     def __init__(
@@ -205,17 +226,30 @@ class State(object):
                 edges[i, j] = None
         return State(before, after, edges)
 
-def transfer(instr : Instruction, env : PythonEnvironment) -> (PythonEnvironment, bool):
+def call_function(instr : Instruction, env : PythonEnvironment, globals : Dict[str, Any]):
+    args = []
+    for i in range(instr.arg): args.insert(0, env.stack.pop())
+    method = env.stack.pop()
+    out = NullabilityDomain(0)
+    for tag in method.tags:
+        if tag.opname == 'LOAD_GLOBAL' and tag.argval in globals:
+            var = globals[tag.argval]
+            if hasattr(var, '__annotations__') and 'return' in var.__annotations__:
+                out |= NullabilityDomain(is_nullable(var.__annotations__['return']))
+    return (Tagged({instr}, out),)
+
+
+def transfer(instr : Instruction, env : PythonEnvironment, globals : Dict[str, Any]) -> (PythonEnvironment, bool):
     env = PythonEnvironment(
         StackDomain(env.stack),
         LocalsDomain(env.locals),
         GlobalsDomain(env.globals),
         list(env.shape))
-
     switch = {
-        'LOAD_CONST' : lambda: (1 if instr.argrepr == 'None' else 0,),
-        'STORE_FAST' : lambda: env.locals.__setitem__(instr.arg, env.stack.pop(-1)) or (),
-        'LOAD_FAST'  : lambda: (env.locals[instr.arg] if instr.arg in env.locals else NullabilityDomain(0),)
+        'LOAD_CONST'    : lambda: (Tagged({instr}, NullabilityDomain(1 if instr.argrepr == 'None' else 0)),),
+        'STORE_FAST'    : lambda: env.locals.__setitem__(instr.arg, env.stack.pop(-1)) or (),
+        'LOAD_FAST'     : lambda: (env.locals[instr.arg] if instr.arg in env.locals else Tagged({instr}, NullabilityDomain(0)),),
+        'CALL_FUNCTION' : lambda: call_function(instr, env, globals),
     }
 
     effect = stack_effect(instr.opcode, instr.arg)
@@ -224,25 +258,26 @@ def transfer(instr : Instruction, env : PythonEnvironment) -> (PythonEnvironment
     if instr.opname == 'SETUP_LOOP': env.shape.append(0)
     if instr.opname in switch:
         oldStackSize = len(env.stack)
-        for i in switch[instr.opname](): env.stack.append(NullabilityDomain(i))
+        for tag in switch[instr.opname](): env.stack.append(tag)
         effect = stack_effect(instr.opcode, instr.arg)
         assert len(env.stack) - oldStackSize == effect
     else:
         if effect < 0:
             # pop effect off of stack
-            for i in range(-effect): env.stack.pop(-1)
+            for tag in range(-effect): env.stack.pop(-1)
         elif effect > 0:
             # push NonNulls on
-            for i in range(effect): env.stack.append(NullabilityDomain(0))
+            for tag in range(effect): env.stack.append(Tagged({instr}, NullabilityDomain(0)))
     return env
 
 
-def transfer_cfg(cfg : CFG, state : State) -> (State, bool):
+def transfer_cfg(cfg : CFG, state : State, globals) -> (State, bool):
     oldState = state
     state = State(dict(state.before), dict(state.after), dict(state.edges))
     changed = False
     # just go through the cfg
     for i, block in enumerate(cfg.blocks):
+        if i in cfg.dead_nodes: continue
         # compute the before state
         if i in cfg.reverse_edges:
             # print(cfg.reverse_edges[i], i, state.edges)
@@ -257,7 +292,7 @@ def transfer_cfg(cfg : CFG, state : State) -> (State, bool):
         env = join
         for instr in block:
             state.before[instr] = env
-            newEnv = transfer(instr, env)
+            newEnv = transfer(instr, env, globals)
             state.after[instr] = newEnv
             if newEnv != oldState.after[instr]:
                 changed = True
@@ -270,13 +305,31 @@ def transfer_cfg(cfg : CFG, state : State) -> (State, bool):
                 state.edges[i, j] = env
     return state, changed
 
+
+def is_nullable(object):
+    return object == None or \
+           object == type(None) or \
+           (hasattr(object, '__union_set_params__') and type(None) in object.__union_set_params__)
+
 def check(function, globals):
     cfg = CFG(function.__code__).build()
     # print(cfg.dot())
-
-    state = State.make(cfg)
-    state, changed = transfer_cfg(cfg, state)
+    # Make initials
+    init = {
+        cfg.blocks[0][0] : PythonEnvironment(
+            None,
+            LocalsDomain(
+                {
+                    function.__code__.co_varnames.index(key) :
+                    Tagged(set(), NullabilityDomain(is_nullable(function.__annotations__[key])))
+                 for key in function.__annotations__ if key != 'return'}))
+    }
+    state = State.make(cfg, init)
+    state, changed = transfer_cfg(cfg, state, globals)
     while changed:
-        state, changed = transfer_cfg(cfg, state)
+        state, changed = transfer_cfg(cfg, state, globals)
 
-    pprint(state.before)
+    output = reduce(lambda x, y: x | y, (state.before[ret].stack[-1] for ret in cfg.returns))
+    for instr in cfg.bytecode:
+        print(instr.opname + ('(%s)' % instr.argval if instr.arg is not None else ''), state.before[instr], '->', state.after[instr])
+    print(output)

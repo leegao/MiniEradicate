@@ -42,16 +42,36 @@ class CFG(object):
                 if target in REL: target += i
                 edges[i].add(targets[target])
 
-        # for i, block in enumerate(blocks):
-        #     print(i, block)
-        #     print(edges[i])
         reverse_edges = defaultdict(set)
         for i, js in edges.items():
             for j in js:
                 reverse_edges[j].add(i)
+
+        # Find dead nodes
+        found_all = False
+        dead_nodes = set()
+        while not found_all:
+            found_all = True
+            for i, block in enumerate(blocks):
+                if not i: continue
+                if i in dead_nodes: continue
+                if i not in reverse_edges or reverse_edges[i].issubset(dead_nodes):
+                    dead_nodes.add(i)
+                    found_all = False
+        for dead in dead_nodes:
+            if dead in edges: edges.pop(dead)
+            if dead in reverse_edges: reverse_edges.pop(dead)
+        for i,e in edges.items():
+            for dead in dead_nodes:
+                if dead in e: e.remove(dead)
+        for i,e in reverse_edges.items():
+            for dead in dead_nodes:
+                if dead in e: e.remove(dead)
         self.blocks = blocks
         self.edges = dict(edges)
         self.reverse_edges = dict(reverse_edges)
+        self.dead_nodes = dead_nodes
+        self.returns = {instr for instr in self.bytecode if instr.opname == 'RETURN_VALUE'}
         return self
 
     def dot(self):

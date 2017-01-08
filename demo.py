@@ -1,15 +1,14 @@
-from typing import no_type_check
+from typing import no_type_check, Optional, T
 
-from minieradicate.annotations import Nullable
 from minieradicate.typecheck import check
 
 @no_type_check
-def bar(x : Nullable) -> Nullable:
-    return x
+def bar(x : T) -> Optional[T]:
+    return 1 if x.foo() else None
 
 @no_type_check
-def foo(z : ...) -> ...:
-    for y in z:
-        bar(z, y), 3
+def foo(z : Optional[T]) -> None:
+    return bar(z)
 
 check(foo, locals())
+check(bar, locals())
