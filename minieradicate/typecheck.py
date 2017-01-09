@@ -1,7 +1,6 @@
 from dis import Instruction, stack_effect
 from functools import reduce
-from pprint import pprint
-from typing import List, TypeVar, Dict, Tuple, Optional, Any, Set
+from typing import List, TypeVar, Dict, Tuple, Any, Set
 
 from minieradicate.bytecode.cfg import CFG
 
@@ -280,9 +279,9 @@ def transfer_cfg(cfg : CFG, state : State, globals) -> (State, bool):
         if i in cfg.dead_nodes: continue
         # compute the before state
         if i in cfg.reverse_edges:
-            # print(cfg.reverse_edges[i], i, state.edges)
-            preds = [state.edges[j, i] for j in cfg.reverse_edges[i] if state.edges[j, i]]
-            join = reduce(lambda a, b: a | b, preds)
+            join = reduce(
+                lambda a, b: a | b,
+                (state.edges[j, i] for j in cfg.reverse_edges[i] if state.edges[j, i]))
         else:
             join = state.before[block[0]] or PythonEnvironment()
         if not oldState.before[block[0]] or oldState.before[block[0]] != join:
@@ -292,11 +291,10 @@ def transfer_cfg(cfg : CFG, state : State, globals) -> (State, bool):
         env = join
         for instr in block:
             state.before[instr] = env
-            newEnv = transfer(instr, env, globals)
-            state.after[instr] = newEnv
-            if newEnv != oldState.after[instr]:
+            state.after[instr] = transfer(instr, env, globals)
+            if state.after[instr] != oldState.after[instr]:
                 changed = True
-            env = newEnv
+            env = state.after[instr]
         # at the end, propagate env to the edges
         # assume for now that the propagation is flow insensitive
         if i in cfg.edges:
@@ -311,9 +309,8 @@ def is_nullable(object):
            object == type(None) or \
            (hasattr(object, '__union_set_params__') and type(None) in object.__union_set_params__)
 
-def check(function, globals):
+def solve(function, globals):
     cfg = CFG(function.__code__).build()
-    # print(cfg.dot())
     # Make initials
     init = {
         cfg.blocks[0][0] : PythonEnvironment(
@@ -322,14 +319,15 @@ def check(function, globals):
                 {
                     function.__code__.co_varnames.index(key) :
                     Tagged(set(), NullabilityDomain(is_nullable(function.__annotations__[key])))
-                 for key in function.__annotations__ if key != 'return'}))
+                    for key in function.__annotations__ if key != 'return'
+                }))
     }
-    state = State.make(cfg, init)
-    state, changed = transfer_cfg(cfg, state, globals)
+    state, changed = transfer_cfg(cfg, State.make(cfg, init), globals)
     while changed:
         state, changed = transfer_cfg(cfg, state, globals)
 
     output = reduce(lambda x, y: x | y, (state.before[ret].stack[-1] for ret in cfg.returns))
-    for instr in cfg.bytecode:
-        print(instr.opname + ('(%s)' % instr.argval if instr.arg is not None else ''), state.before[instr], '->', state.after[instr])
-    print(output)
+    return cfg, state, output
+
+def check(function, globals):
+    cfg, state, output = solve(function, globals)
