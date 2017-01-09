@@ -8,5 +8,7 @@ def bar(x : T) -> Optional[T]:
 def foo(z : Optional[T]) -> None:
     return bar(z)
 
-check(foo, locals())
-check(bar, locals())
+items = locals().items()
+for k,v in list(items):
+    if hasattr(v, '__annotations__'):
+        print(k, check(v, locals()))

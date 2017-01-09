@@ -8,6 +8,10 @@ class Domain(object):
 
     def __and__(self, other : 'D'): ...
 
+    @classmethod
+    def abstract(cls, object):
+        raise NotImplementedError()
+
 D = TypeVar('D', bound = Domain)
 class StackDomain(List[D], Domain):
     def __le__(self, other):

@@ -1,13 +1,12 @@
-from dis import Instruction, stack_effect
-from typing import Dict, Any
+from dis import Instruction
 
 from minieradicate.analysis.dataflow import Dataflow
-from minieradicate.analysis.domain import Domain, StackDomain, LocalsDomain, GlobalsDomain, Tagged, PythonEnvironment
+from minieradicate.analysis.domain import Domain, PythonEnvironment
 
 
 class NullabilityDomain(Domain):
-    def __init__(self, n : int):
-        self.n = 1 if n else 0
+    def __init__(self, n : bool):
+        self.n = n
 
     def __le__(self, other : 'NullabilityDomain'):
         return self.n < other.n
@@ -22,20 +21,11 @@ class NullabilityDomain(Domain):
         return self.n == other.n
 
     def __repr__(self):
-        return str(bool(self.n))
+        return 'Optional' if self.n else 'NotNull'
 
-
-def call_function(instr : Instruction, env : PythonEnvironment, globals : Dict[str, Any]):
-    args = []
-    for i in range(instr.arg): args.insert(0, env.stack.pop())
-    method = env.stack.pop()
-    out = NullabilityDomain(0)
-    for tag in method.tags:
-        if tag.opname == 'LOAD_GLOBAL' and tag.argval in globals:
-            var = globals[tag.argval]
-            if hasattr(var, '__annotations__') and 'return' in var.__annotations__:
-                out |= NullabilityDomain(is_nullable(var.__annotations__['return']))
-    return (Tagged({instr}, out),)
+    @classmethod
+    def abstract(cls, object):
+        return NullabilityDomain(object == None)
 
 
 def is_nullable(object):
@@ -45,40 +35,23 @@ def is_nullable(object):
 
 
 class NullabilityAnalysis(Dataflow):
-    def domain(self, object):
-        NullabilityDomain(is_nullable(object))
+    def from_type(self, type):
+        return NullabilityDomain(is_nullable(type))
 
-    def transfer(self, instr: Instruction, env: PythonEnvironment) -> (PythonEnvironment, bool):
-        env = PythonEnvironment(
-            StackDomain(env.stack),
-            LocalsDomain(env.locals),
-            GlobalsDomain(env.globals),
-            list(env.shape))
-        switch = {
-            'LOAD_CONST': lambda: (Tagged({instr}, NullabilityDomain(1 if instr.argrepr == 'None' else 0)),),
-            'STORE_FAST': lambda: env.locals.__setitem__(instr.arg, env.stack.pop(-1)) or (),
-            'LOAD_FAST': lambda: (
-            env.locals[instr.arg] if instr.arg in env.locals else Tagged({instr}, NullabilityDomain(0)),),
-            'CALL_FUNCTION': lambda: call_function(instr, env, self.external),
-        }
-
-        effect = stack_effect(instr.opcode, instr.arg)
-        if instr.opname == 'POP_BLOCK':
-            effect = -env.shape.pop(-1)
+    def domain(self, *args):
+        if args:
+            return NullabilityDomain.abstract(*args)
         else:
-            env.shape[-1] += effect
-        if instr.opname == 'SETUP_LOOP': env.shape.append(0)
-        if instr.opname in switch:
-            oldStackSize = len(env.stack)
-            for tag in switch[instr.opname](): env.stack.append(tag)
-            effect = stack_effect(instr.opcode, instr.arg)
-            assert len(env.stack) - oldStackSize == effect
-        else:
-            if effect < 0:
-                # pop effect off of stack
-                for tag in range(-effect): env.stack.pop(-1)
-            elif effect > 0:
-                # push NonNulls on
-                for tag in range(effect): env.stack.append(Tagged({instr}, NullabilityDomain(0)))
-        return env
+            return NullabilityDomain(False)
 
+    def call_function(self, instr: Instruction, env: PythonEnvironment):
+        args = []
+        for i in range(instr.arg): args.insert(0, env.stack.pop())
+        method = env.stack.pop()
+        out = NullabilityDomain(False)
+        for tag in method.tags:
+            if tag.opname == 'LOAD_GLOBAL' and tag.argval in self.external:
+                var = self.external[tag.argval]
+                if hasattr(var, '__annotations__') and 'return' in var.__annotations__:
+                    out |= NullabilityDomain(is_nullable(var.__annotations__['return']))
+        return [out]
